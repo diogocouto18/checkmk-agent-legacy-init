@@ -13,6 +13,27 @@ This repo is the condensed, copy-pasteable version of Checkmk's own [legacy mode
 - **Is**: the agent runs as a script, served on TCP port 6556 by `xinetd` (or another super-server), no Agent Controller, no registration.
 - **Isn't**: encrypted. Legacy mode has no pull/push encryption — either restrict `xinetd`'s `only_from` to your Checkmk server's IP, or tunnel over SSH instead (see [the official docs](https://docs.checkmk.com/latest/en/agent_linux_legacy.html) for the SSH tunnel approach if that matters for your setup).
 
+## Supported distros and prerequisites
+
+Tested means the installer was actually run there; untested means it should work (plain POSIX `sh`, xinetd, `ss` or `netstat`) but nobody has verified it.
+
+| Distro | Status |
+|---|---|
+| Ubuntu 22.04 (container, xinetd 2.3.15) | Tested (install, second run, uninstall) |
+| Ubuntu 12.04 / 14.04 | Untested by the maintainer on real hosts; the target audience, script is POSIX `sh` and avoids bashisms |
+| Debian 7/8/9 | Untested |
+| CentOS/RHEL 6 | Untested (`yum install xinetd`) |
+
+Prerequisites (as root):
+
+```bash
+apt-get update && apt-get install -y xinetd netcat   # Debian/Ubuntu; netcat is only for the test
+```
+
+The scripts use `service xinetd restart`. If `service` is missing, use `/etc/init.d/xinetd restart` instead (manual steps below), and restart xinetd yourself after running the installer. Verification uses `ss`, falling back to `netstat`; if neither exists it warns and skips the listener check.
+
+**Firewall**: port 6556/tcp must be reachable from your Checkmk server only. `only_from` is a second line of defence, not a substitute, e.g. `iptables -A INPUT -p tcp --dport 6556 -s <checkmk-server-ip> -j ACCEPT` followed by a `DROP` for the rest.
+
 ## Manual steps
 
 1. **Get the agent script** from your Checkmk server (Setup → Agents → Linux):
@@ -62,6 +83,34 @@ The agent output (hostnames, processes, installed packages) is unauthenticated a
 | `--insecure-any` | Explicitly accepts exposure to every host (prints a warning). |
 
 Values are validated as IPv4 or IPv4/CIDR before anything on the system is touched.
+
+Re-running the installer is safe: unchanged files are left alone (no restart), and files that differ are backed up to `*.bak` before being replaced. To upgrade the agent, download the new `check_mk_agent.linux` and run the installer again.
+
+## Uninstall
+
+```bash
+sudo ./uninstall.sh
+```
+
+Or by hand:
+
+```bash
+rm -f /etc/xinetd.d/check-mk-agent /usr/bin/check_mk_agent
+sed -i '/^checkmk-agent/d' /etc/services
+service xinetd restart      # or: /etc/init.d/xinetd restart
+```
+
+`/usr/lib/check_mk_agent`, `/etc/check_mk`, `/var/lib/check_mk_agent` and any `*.bak` files are not removed.
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| Installer says xinetd is not installed | `apt-get install xinetd` |
+| "not listening on port 6556" | Config syntax error or port taken: run `ss -tlnp \| grep 6556` and look at the syslog for `xinetd` |
+| `nc localhost 6556` returns nothing | `only_from` blocks the connecting address. `localhost` may resolve to `::1`, which an IPv4 `only_from` rejects; try `nc -4 127.0.0.1 6556` |
+| Works locally, Checkmk cannot connect | Firewall, or `only_from` does not include the Checkmk server's IP |
+| Installer rejects the input file | The file must start with `#!`; a download error often saves an HTML page instead |
 
 ## Source
 
