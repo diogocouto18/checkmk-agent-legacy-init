@@ -50,8 +50,18 @@ This repo is the condensed, copy-pasteable version of Checkmk's own [legacy mode
 
 ```bash
 wget http://<your-checkmk-server>/<site>/check_mk/agents/check_mk_agent.linux
-sudo ./install.sh check_mk_agent.linux
+sudo ./install.sh --only-from <checkmk-server-ip> check_mk_agent.linux
 ```
+
+The agent output (hostnames, processes, installed packages) is unauthenticated and unencrypted, so the installer **refuses to run** unless you say who may reach it:
+
+| Option | Effect |
+|---|---|
+| `--only-from <ip[/cidr][,...]>` | Writes `only_from` into the xinetd config so only your Checkmk server(s) can connect. Also settable via the `CHECKMK_ALLOW_FROM` env var. |
+| `--bind <ip>` | Writes `bind`, e.g. `--bind 127.0.0.1` to keep the agent loopback-only and reach it through an SSH tunnel. |
+| `--insecure-any` | Explicitly accepts exposure to every host (prints a warning). |
+
+Values are validated as IPv4 or IPv4/CIDR before anything on the system is touched.
 
 ## Source
 
