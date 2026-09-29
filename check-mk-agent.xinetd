@@ -8,5 +8,6 @@ service check_mk
         user           = root
         server         = /usr/bin/check_mk_agent
         # only_from    = 203.0.113.10
+        # bind         = 127.0.0.1
         disable        = no
 }
