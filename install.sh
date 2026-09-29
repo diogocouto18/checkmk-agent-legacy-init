@@ -93,36 +93,112 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+XINETD_TEMPLATE="$SCRIPT_DIR/check-mk-agent.xinetd"
+AGENT_DEST=/usr/bin/check_mk_agent
+XINETD_DEST=/etc/xinetd.d/check-mk-agent
+CHANGED=0
 
-echo "==> Installing agent script to /usr/bin/check_mk_agent"
-cp "$AGENT_SCRIPT" /usr/bin/check_mk_agent
-chmod 755 /usr/bin/check_mk_agent
+# Preflight: fail early with an actionable message instead of a cryptic error
+# halfway through the install.
+if ! command -v service >/dev/null 2>&1; then
+  echo "The 'service' command was not found; this installer needs a SysV-style init (or the 'service' wrapper)." >&2
+  echo "Install the init scripts package or restart xinetd manually after copying the files." >&2
+  exit 1
+fi
+if [ ! -x /usr/sbin/xinetd ] && ! command -v xinetd >/dev/null 2>&1; then
+  echo "xinetd is not installed. Install it first, e.g.: apt-get install xinetd" >&2
+  exit 1
+fi
+if [ ! -f "$XINETD_TEMPLATE" ]; then
+  echo "Missing xinetd template next to install.sh: $XINETD_TEMPLATE" >&2
+  exit 1
+fi
+# The agent must be a script (shebang), not an HTML error page or empty file.
+if [ "$(head -c 2 "$AGENT_SCRIPT")" != "#!" ]; then
+  echo "$AGENT_SCRIPT does not look like the agent script (no '#!' shebang on the first line)." >&2
+  exit 1
+fi
+
+TMPDIR_INSTALL="$(mktemp -d)"
+trap 'rm -rf "$TMPDIR_INSTALL"' EXIT INT TERM
+
+# install_file <src> <dest> <mode>: copy only when content or mode differs,
+# keeping a .bak of whatever was there before. Sets CHANGED=1 if it wrote.
+install_file() {
+  src="$1"; dest="$2"; mode="$3"
+  if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+    chmod "$mode" "$dest"
+    echo "    unchanged: $dest"
+    return 0
+  fi
+  if [ -f "$dest" ]; then
+    bak="$dest.bak"
+    [ ! -e "$bak" ] || bak="$dest.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "$dest" "$bak"
+    echo "    backed up $dest -> $bak"
+  fi
+  cp "$src" "$dest"
+  chmod "$mode" "$dest"
+  echo "    installed: $dest"
+  CHANGED=1
+}
+
+echo "==> Installing agent script to $AGENT_DEST"
+install_file "$AGENT_SCRIPT" "$AGENT_DEST" 755
 
 echo "==> Creating required directories"
 mkdir -p /usr/lib/check_mk_agent /etc/check_mk /var/lib/check_mk_agent
 
 echo "==> Installing xinetd service config"
-cp "$SCRIPT_DIR/check-mk-agent.xinetd" /etc/xinetd.d/check-mk-agent
+XINETD_NEW="$TMPDIR_INSTALL/check-mk-agent"
+cp "$XINETD_TEMPLATE" "$XINETD_NEW"
 if [ -n "$ONLY_FROM" ]; then
-  sed -i "s|^[[:space:]]*# only_from .*|        only_from      = $ONLY_FROM|" /etc/xinetd.d/check-mk-agent
+  sed -i "s|^[[:space:]]*# only_from .*|        only_from      = $ONLY_FROM|" "$XINETD_NEW"
 fi
 if [ -n "$BIND_ADDR" ]; then
-  sed -i "s|^[[:space:]]*# bind .*|        bind           = $BIND_ADDR|" /etc/xinetd.d/check-mk-agent
+  sed -i "s|^[[:space:]]*# bind .*|        bind           = $BIND_ADDR|" "$XINETD_NEW"
 fi
+install_file "$XINETD_NEW" "$XINETD_DEST" 644
 
 if ! grep -q "^checkmk-agent" /etc/services 2>/dev/null; then
   echo "==> Registering checkmk-agent in /etc/services"
   echo "checkmk-agent        6556/tcp   #Checkmk monitoring agent" >> /etc/services
 fi
 
-echo "==> Restarting xinetd"
-service xinetd restart
+# xinetd listens on 6556 only if it is running with our config.
+listener_up() {
+  if command -v ss >/dev/null 2>&1; then
+    ss -tlnp 2>/dev/null | grep ':6556[[:space:]]' | grep -q xinetd
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -tlnp 2>/dev/null | grep ':6556[[:space:]]' | grep -q xinetd
+  else
+    return 2
+  fi
+}
+
+if [ "$CHANGED" -eq 1 ] || ! listener_up; then
+  echo "==> Restarting xinetd"
+  service xinetd restart
+else
+  echo "==> No changes; xinetd already serving 6556, not restarting"
+fi
 
 echo "==> Verifying"
-sleep 1
-if command -v ss >/dev/null 2>&1; then
-  ss -tulpn 2>/dev/null | grep -q 6556 && echo "xinetd is listening on 6556" || echo "WARNING: nothing listening on 6556 yet — check xinetd logs"
-fi
+tries=0
+while :; do
+  listener_up && rc=0 || rc=$?
+  [ "$rc" -eq 0 ] && { echo "xinetd is listening on 6556"; break; }
+  if [ "$rc" -eq 2 ]; then
+    echo "WARNING: neither ss nor netstat found; cannot verify the listener" >&2
+    break
+  fi
+  tries=$((tries + 1))
+  if [ "$tries" -ge 10 ]; then
+    echo "ERROR: xinetd is not listening on port 6556 — check xinetd logs (syslog) and $XINETD_DEST" >&2
+    exit 1
+  fi
+  sleep 1
+done
 
 echo "==> Done. Test with: nc localhost 6556"
 if [ "$INSECURE_ANY" -eq 1 ] && [ -z "$ONLY_FROM" ] && [ -z "$BIND_ADDR" ]; then
