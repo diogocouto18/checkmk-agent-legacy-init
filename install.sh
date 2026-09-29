@@ -27,6 +27,7 @@ is_ipv4() {
     *[!0-9.]*|""|.*|*.|*..*) return 1 ;;
   esac
   old_ifs="$IFS"; IFS=.
+  # shellcheck disable=SC2086 # intentional word splitting on "."
   set -- $1
   IFS="$old_ifs"
   [ "$#" -eq 4 ] || return 1
